@@ -14,6 +14,7 @@
 #include "GFilter.h"
 #include "MyBlender.h"
 #include "GBlendMode.h"
+#include "GPath.h"
 
 class MyCanvas : public GCanvas {
 public:
@@ -60,7 +61,7 @@ public:
 
             //blend with the old layers bitmap
             for(int i = 0; i < temp.bounds->height(); i++) {
-                cout << "asdf" << endl;
+                // cout << "asdf" << endl;
                 if(temp.paint->getFilter() != nullptr) {
                     //If the paint has a filter, apply it before blending with previous layer
 
@@ -90,7 +91,167 @@ public:
     }
 
     void drawPath(const GPath& path, const GPaint& paint) {
-        
+        //Transform Path
+        GPath p = path;
+        p.transform(layers.top().ctm.top());
+
+        if(p.countPoints() <= 3) {
+            cout << "bad path (<3points)" << endl;
+        }
+
+        //Create edges from path
+        GPoint *pts = new GPoint[2];
+        pair<GPoint, GPoint> *edges = new pair<GPoint, GPoint>[p.countPoints()];
+        GPath::Edger edger = *(new GPath::Edger(p));
+        for (int i = 0; i < p.countPoints(); ++i) {
+            edger.next(pts);
+            GPoint a = GPoint::Make(pts[0].x(), pts[0].y());
+            GPoint b = GPoint::Make(pts[1].x(), pts[1].y());
+            edges[i] = make_pair(a, b);
+        }
+
+        //Draw inside bounds of path
+        float startY = p.bounds().top();
+        float endY = p.bounds().bottom();
+        float startX = p.bounds().left();
+        float endX = p.bounds().right();
+        // if(endY > 120 || endX > 120)
+        //     return;
+        // cout << startX << "  " << endX << endl;
+        // cout << startY << "  " << endY << endl;
+        // cout << "---------" << endl;
+        // for(int i = 0; i < p.countPoints(); i++) {
+        //     // cout << "(" << edges[i].first.x() << ", " << edges[i].first.y() << ") -> (" << edges[i].second.x() << ", " << edges[i].second.y() << endl;
+        // }
+
+        // For every row
+        for(int y = GRoundToInt(startY); y < GRoundToInt(endY); y++) {
+            int winding = 0;
+            int idx = 0;
+            pair<int, int> *rowsToShade = new pair<int, int>[p.countPoints()];
+            
+            // For each pixel in the row check if it intersects a line
+            for(int x = GRoundToInt(startX); x < GRoundToInt(endX)+1; x++) {                
+              for(int edge = 0; edge < p.countPoints(); edge++) {
+                //If the current point intersects a line, change winding accordingly
+                if(edges[edge].first.y() != edges[edge].second.y() && intersects(GPoint::Make(x, y), edges[edge].first, edges[edge].second)) {
+                    int windingWas = winding;
+                    if(edges[edge].first.y() < edges[edge].second.y()) {
+                        // cout << edges[edge].first.y() << " " << edges[edge].second.y() << endl;
+                        winding--;
+                    } else if(edges[edge].first.y() > edges[edge].second.y()) {
+                        winding++;
+                    }
+
+                    // cout << winding << endl;
+                    if(winding == 1 && windingWas != 2) {
+                        // cout << "start: " << x << endl;
+                        rowsToShade[idx].first = GRoundToInt(x);
+                    } else if(winding == 0 && windingWas != -1) {
+                        rowsToShade[idx].second = GRoundToInt(x);
+                        // cout << "end: " << x << endl;
+                        idx++;
+                    }
+                }
+
+                // cout << winding;
+
+              }
+            }
+
+
+            // cout << endl;
+
+            // rowsToShade[0].first = startX;
+            // rowsToShade[0].second = endX;
+
+            //Shade all the subrows for this y value
+            for(int i = 0; i <= idx; i++) {
+                float leftX = rowsToShade[i].first;
+                float rightX = rowsToShade[i].second;
+                int size = GRoundToInt(rightX) - GRoundToInt(leftX);
+                cout << leftX << " " << rightX << endl;
+
+                if(size <= 0) {
+                    break;
+                }
+
+                GPixel *storage = new GPixel[size];
+
+                if(paint.getShader()) {
+                    //If the paint has a shader, use that to shade this row of pixels
+
+                    //Idk why I did this but it crashes without
+                    if(!paint.getShader()->setContext(layers.top().ctm.top())) {
+                        cout << "set context failed" << endl;
+                        return;
+                    }
+
+                    paint.getShader()->shadeRow(GRoundToInt(leftX), y, GRoundToInt(rightX) - GRoundToInt(leftX), storage);
+                } else {
+                    //Otherwise draw the paints color over the bitmap from left to right
+                    for(int x = 0; x < size; x++) {
+                        GColor p = paint.getColor();
+                        if((p.fA < 0 || p.fA > 1)
+                           || (p.fR < 0 || p.fR > 1)
+                           || (p.fG < 0 || p.fG > 1)
+                           || (p.fB < 0 || p.fB > 1)) {
+                            return;
+                        } else {
+    //                        cout << "- " << p.fA << " " << p.fR << " " << p.fG << " " << p.fB << endl;
+
+                            if(p.fA == 0) {
+                                p.fR = 0;
+                                p.fG = 0;
+                                p.fB = 0;
+                            }
+                            storage[x] = GPixel_PackARGB(p.fA*255, p.fR*p.fA*255, p.fG*p.fA*255, p.fB*p.fA*255);
+                        }
+
+                    }
+                }
+
+                if(paint.getFilter() != nullptr) {
+                    paint.getFilter()->filter(storage, storage, size);
+                }
+
+                //Draw
+                drawPixels(paint, storage, GRoundToInt(leftX), y, size);
+            }
+        }
+
+    }
+
+    bool intersects(GPoint a, GPoint b, GPoint c) {
+        //If a is not in the boundary of the rect formed by b and c
+        if((b.y() < c.y() && ((a.y() < b.y()) || (a.y() > c.y()))) 
+            || (b.y() > c.y() && ((a.y() > b.y()) || (a.y() < c.y()))))
+            return false;
+
+        if((b.x() < c.x() && ((a.x() < b.x()) || (a.x() > c.x()))) 
+            || (b.x() > c.x() && ((a.x() > b.x()) || (a.x() < c.x()))))
+            return false;
+
+        int x = GRoundToInt(((c.x()-b.x())/(c.y()-b.y()))*(a.y()-b.y())+b.x());
+        if(a.x() == GRoundToInt(b.x()) && GRoundToInt(b.x()) == GRoundToInt(c.x())) {
+            // cout << "(" << a.x() << ", " << a.y() << ") ";
+            //         cout << "(" << b.x() << ", " << b.y() << ") ";
+            //         cout << "(" << c.x() << ", " << c.y() << ") ";
+            //         cout << "(" << x << ", " << a.y() << ") " << endl;;
+            return true;
+        }
+
+        //Calculate the x value 
+        if(a.x() >= x && a.x()-1 < x) {
+            // cout << "(" << a.x() << ", " << a.y() << ") ";
+            // cout << "(" << b.x() << ", " << b.y() << ") ";
+            // cout << "(" << c.x() << ", " << c.y() << ") ";
+            // cout << "(" << x << ", " << a.y() << ") " << endl;;
+            return true;
+        }
+
+        return false;
+
     }
 
     void concat(const GMatrix& a) {
@@ -237,6 +398,10 @@ public:
     void drawPixels(GPaint paint, GPixel *pixel, int x, int y, int count) {
         //Draw a row of pixels onto the current bitmap of length = count
         for(int i = 0; i < count; i++) {
+            //make sure pixel is inside screen area
+            if(x+i < 0 || x+i >= layers.top().bitmap->width()
+                || y < 0 || y >= layers.top().bitmap->height()) break;
+
             GPixel *address = layers.top().bitmap->getAddr(x + i, y);
             GPixel dest = *address;
 
